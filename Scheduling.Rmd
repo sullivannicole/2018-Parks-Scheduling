@@ -1,0 +1,727 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(RQuantLib)
+library(lubridate)
+```
+
+## Dates for All Parks & Times for No. 1 Parks of Pairings
+
+Note that paired parks receive counts on the exact same days, but at adjacent times (or as close to adjacent as possible).  Therefore, dates randomly selected apply to all parks, but timeslots must be selected separately.
+
+```{r}
+
+# Calculate days in the summer season for the year
+memorial_labor <- as_tibble(RQuantLib::getHolidayList(calendar = 'UnitedStates', from = as_date(ymd('20190501')), to = as_date(ymd('20190930')), includeWeekends = FALSE))
+
+# Calculate midpoint of summer
+summer_days <- memorial_labor %>%
+  rename(Date = 1) %>%
+  slice(-2) %>% # remove Fourth of July
+  mutate(row_id = row_number()) %>%
+  mutate(Holiday = ifelse(row_id == 1, 'Memorial_Day',
+                          'Labor_Day')) %>%
+  select(-row_id) %>%
+  spread(Holiday, value = Date) %>%
+  mutate(Memorial_Day_Saturday = as_date(ymd(Memorial_Day))- days(2)) %>% # Summer season begins the Saturday before Memorial Day
+  mutate(Season_period = as.period(interval(start = as_date(ymd(Memorial_Day_Saturday)),
+                                            end = as_date(ymd(Labor_Day))),
+                                   unit = 'day')) %>%
+  separate(Season_period, into = c('Season_days', "HMS_in_season"),
+           sep = 'd') %>%
+  mutate(Half_of_summer = (as.numeric(Season_days)/2)) %>%
+  mutate(Midpoint_of_summer = as_date(ymd(Memorial_Day_Saturday)) + days(Half_of_summer))
+
+# Create dataframe of all dates in counting season
+
+date <- summer_days$Memorial_Day_Saturday-1
+labor.day <-summer_days$Labor_Day
+summer_dates <- list()
+i <- 1
+
+while(date < labor.day) {
+  
+  date = date + 1
+  summer_dates[[i]] <- as.character(date)
+  i <- i + 1
+  
+}
+
+summer_dates_df <- setNames(do.call(rbind.data.frame, summer_dates), c('Date'))
+
+summer_midpt <- summer_dates_df %>%
+  mutate(Index = row_number()) %>%
+  mutate(Half_of_summer = ifelse(as_date(Date) < summer_days$Midpoint_of_summer, 'First', 'Second')) %>%
+  mutate(Day_type = ifelse(RQuantLib::isHoliday(calendar = "UnitedStates",
+                                        dates = as_date(Date)) == TRUE, 'Weekend_holiday', 'Weekday'))
+
+summer_midpt_grouped <- summer_midpt %>%
+  group_by(Half_of_summer, Day_type)
+
+# Reproducible random date selection (4 for each block - 1st half WD, 1st half WE, 2nd half WD, 2nd half WE) for each park pairing
+
+i <- 1
+samples <- list()
+
+while(i < 74) {
+  
+set.seed(i)
+samples[[i]] <- sample_n(summer_midpt_grouped, 4, replace = F) %>% mutate(Pairing = i)
+i <- i + 1
+
+}
+
+dates_samples <- do.call(bind_rows, samples) # 16 samples for each pairing, 4 for each block
+
+pairings <- read_csv('Indices/2019 Pairings.csv')
+
+pairings_dates <- left_join(pairings, dates_samples, by = 'Pairing') # Add the park name and agency name by pairing - each true pair (some parks are unpaired) will have the exact same dates in each block
+
+
+########## Reproducible random timeslot selection
+
+setwd('Entrance Updates/2019 Use Classifications Received from IAs')
+classes_19 <- list.files(pattern = '*.csv')
+classes_l <- map(set_names(classes_19, gsub('.csv$', '', classes_19)), read_csv)
+classes_df <- do.call(bind_rows, classes_l)
+
+# Create a variable that indicates the combination of usage classifications present at the park/trail
+classes_present <- classes_df %>%
+  select(Agency_name, Park_or_trail_name, Usage_class) %>%
+  unique() %>%
+  group_by(Agency_name, Park_or_trail_name, Usage_class) %>%
+  mutate(Index = row_number()) %>%
+  ungroup() %>%
+  spread(Usage_class, value = Index) %>%
+  mutate(High = ifelse(is.na(High), 0, High),
+         Medium = ifelse(is.na(Medium), 0, Medium),
+         Low = ifelse(is.na(Low), 0, Low)) %>%
+  unite(Classes_present, High, Medium, Low)
+
+# Give each park in a pair a key - 1 or 2
+pairings_order_df <- pairings %>%
+  group_by(Pairing) %>%
+  mutate(Pairing_order = row_number()) %>%
+  ungroup()
+
+# Add a variable for the pairing order within each pair (1 or 2)
+timeslot_selection <- left_join(classes_df, pairings_order_df, by = c('Park_or_trail_name' = 'Park_name', 'Agency_name'))
+
+
+# Include a variable that contains data on which classes are present
+selection_df <- left_join(timeslot_selection, classes_present, by = c('Park_or_trail_name', 'Agency_name'))
+
+selection_1_grouped <- selection_df %>%
+  ungroup() %>%
+  filter(Pairing_order == 1) %>%
+  mutate(Sample_block = ifelse(Classes_present == '1_0_0' & is.na(Day_type) |
+                                 Classes_present == '0_1_0' & is.na(Day_type) |
+                                 Classes_present == '0_0_1'& is.na(Day_type), '16 samples to be taken',
+                               ifelse(Classes_present == '1_1_1' & Usage_class == 'High' & is.na(Day_type) |
+                                        Classes_present == '1_1_0' & is.na(Day_type) |
+                                        Classes_present == '0_1_1' & is.na(Day_type) |
+                                        Classes_present == '1_0_1' & is.na(Day_type) |
+                                        Classes_present == '1_0_0' & !is.na(Day_type) | # High sites only, Ramsey
+                                        Classes_present == '0_1_0' & !is.na(Day_type) | # Medium sites only, Ramsey
+                                        Classes_present == '0_0_1' & !is.na(Day_type) , '8 samples to be taken',
+                               ifelse(Classes_present == '1_1_1' & !is.na(Day_type) & Usage_class == 'High' |
+                                        Classes_present == '1_1_1' & Usage_class != 'High' & is.na(Day_type) |
+                                        Classes_present == '1_0_1' & !is.na(Day_type) |
+                                        Classes_present == '1_1_0' & !is.na(Day_type) | Classes_present == '0_1_1' & !is.na(Day_type), '4 samples to be taken', '2 samples to be taken'))))
+
+
+# Take timeslot samples -old; created weekend weeday pairing with seeding
+# set.seed(1234)
+# 
+# select_16 <- selection_1_grouped %>%
+#   ungroup() %>%
+#   filter(Sample_block == '16 samples to be taken') %>%
+#   group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+# 
+# sample_16 <- sample_n(select_16, 16, replace = T)
+# 
+# set.seed(1234)
+# select_8 <- selection_1_grouped %>%
+#   filter(Sample_block == '8 samples to be taken') %>%
+#   group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+# 
+# sample_8 <- sample_n(select_8, 8, replace = T)
+# 
+# set.seed(1234)
+# select_4 <- selection_1_grouped %>%
+#   filter(Sample_block == '4 samples to be taken') %>%
+#   group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+# 
+# sample_4 <- sample_n(select_4, 4, replace = T)
+# 
+# set.seed(1234)
+# select_2 <- selection_1_grouped %>%
+#   filter(Sample_block == '2 samples to be taken') %>%
+#   group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+# 
+# sample_2 <- sample_n(select_2, 2, replace = T)
+
+###### randomized weekend and weekday timeslot samples
+#set.seed(1234) #original seed
+set.seed(256) #Anoka seed
+select_8_we <- selection_1_grouped %>%
+  ungroup() %>%
+  mutate(Include = ifelse(Agency_name == 'Ramsey County' & Day_type == 'Weekend_holiday' & Sample_block == '8 samples to be taken', 1,
+                          ifelse(Agency_name != 'Ramsey County' & Sample_block == '16 samples to be taken', 1, 0))) %>%
+  filter(Include == 1) %>%
+  group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+
+select_8_wd <- selection_1_grouped %>%
+  ungroup() %>%
+  mutate(Include = ifelse(Agency_name == 'Ramsey County' & Day_type == 'Weekday' & Sample_block == '8 samples to be taken', 1,
+                          ifelse(Agency_name != 'Ramsey County' & Sample_block == '16 samples to be taken', 1, 0))) %>%
+  filter(Include == 1) %>%
+  group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+
+
+sample_8_we <- sample_n(select_8_we, 8, replace = T)
+sample_8_wd <- sample_n(select_8_wd, 8, replace = T)
+
+#set.seed(1234) #original seed
+set.seed(892) #Anoka seed
+select_4_we <- selection_1_grouped %>%
+  ungroup() %>%
+  mutate(Include = ifelse(Agency_name == 'Ramsey County' & Day_type == 'Weekend_holiday' & Sample_block == '4 samples to be taken', 1,
+                          ifelse(Agency_name != 'Ramsey County' & Sample_block == '8 samples to be taken', 1, 0))) %>%
+  filter(Include == 1) %>%
+  group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+
+select_4_wd <- selection_1_grouped %>%
+  ungroup() %>%
+  mutate(Include = ifelse(Agency_name == 'Ramsey County' & Day_type == 'Weekday' & Sample_block == '4 samples to be taken', 1,
+                          ifelse(Agency_name != 'Ramsey County' & Sample_block == '8 samples to be taken', 1, 0))) %>%
+  filter(Include == 1) %>%
+  group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+
+sample_4_we <- sample_n(select_4_we, 4, replace = T)
+sample_4_wd <- sample_n(select_4_wd, 4, replace = T)
+
+
+###### select 2
+select_2_we <- selection_1_grouped %>%
+  ungroup() %>%
+  mutate(Include = ifelse(Agency_name == 'Ramsey County' & Day_type == 'Weekend_holiday' & Sample_block == '2 samples to be taken', 1,
+                          ifelse(Agency_name != 'Ramsey County' & Sample_block == '4 samples to be taken', 1, 0))) %>%
+  filter(Include == 1) %>%
+  group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+
+select_2_wd <- selection_1_grouped %>%
+  ungroup() %>%
+  mutate(Include = ifelse(Agency_name == 'Ramsey County' & Day_type == 'Weekday' & Sample_block == '2 samples to be taken', 1,
+                          ifelse(Agency_name != 'Ramsey County' & Sample_block == '4 samples to be taken', 1, 0))) %>%
+  filter(Include == 1) %>%
+  group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+
+#set.seed(1234)
+set.seed(444)
+sample_2_we <- sample_n(select_2_we, 2, replace = T)
+#set.seed(1234)
+set.seed(67)
+sample_2_wd <- sample_n(select_2_wd, 2, replace = T)
+
+############ select 1
+select_1_we <- selection_1_grouped %>%
+  ungroup() %>%
+  mutate(Include = ifelse(Agency_name == 'Ramsey County' & Day_type == 'Weekend_holiday' & Sample_block == '1 sample to be taken', 1,
+                          ifelse(Agency_name != 'Ramsey County' & Sample_block == '2 samples to be taken', 1, 0))) %>%
+  filter(Include == 1) %>%
+  group_by(Agency_name, Park_or_trail_name, Usage_class)
+
+select_1_wd <- selection_1_grouped %>%
+  ungroup() %>%
+  mutate(Include = ifelse(Agency_name == 'Ramsey County' & Day_type == 'Weekday' & Sample_block == '1 sample to be taken', 1,
+                          ifelse(Agency_name != 'Ramsey County' & Sample_block == '2 samples to be taken', 1, 0))) %>%
+  filter(Include == 1) %>%
+  group_by(Agency_name, Park_or_trail_name, Usage_class)
+
+#set.seed(1234)
+set.seed(9895)
+sample_1_we <- sample_n(select_1_we, 1)
+#set.seed(1234)
+set.seed(2003)
+sample_1_wd <- sample_n(select_1_wd, 1)
+
+# Bind all timeslot samples together
+sample_pairs_1 <- bind_rows(sample_8_we, sample_8_wd, sample_4_we, sample_4_wd, sample_2_we, sample_2_wd, sample_1_we, sample_1_wd)
+
+# Create key for timeslot samples that will connect to key in dates df
+times_samples <- sample_pairs_1 %>%
+  ungroup() %>%
+  mutate(Class_duplicate = Usage_class) %>%
+  group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type) %>%
+  mutate(Key = row_number()) %>%
+  ungroup() %>%
+  unite(Block_key, Class_duplicate, Key) %>%
+  mutate(Class_duplicate = Usage_class,
+         Day_type_duplicate = Day_type) %>%
+  group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type) %>%
+  mutate(Key = row_number()) %>%
+  ungroup() %>%
+  unite(Block_day_type_key, Class_duplicate, Day_type_duplicate, Key) %>%
+  mutate(Class_key = ifelse(Agency_name == 'Ramsey County', Block_day_type_key, Block_key)) %>%
+  rename(Day_type_for_class = Day_type) %>%
+  select(-Block_day_type_key, -Block_key, -Classes_present, -Sample_block)
+  
+
+# Smoosh together schedule of dates randomly selected in the above code and the 'classes present' variable created above
+dates_classes_present <- left_join(pairings_dates, classes_present, by = c('Agency_name', 'Park_name' = 'Park_or_trail_name'))
+
+dates_classes_key <- dates_classes_present %>%
+  group_by(Agency_name, Park_name, Half_of_summer, Day_type) %>%
+  mutate(Key = row_number()) %>%
+  ungroup() %>%
+  mutate(Usage_class = ifelse(Classes_present == '1_0_0' |
+                                Classes_present == '1_1_1' & Key == 1 |
+                                Classes_present == '1_1_1' & Key == 2 |
+                                Classes_present == '1_0_1' & Key == 1 |
+                                Classes_present == '1_0_1' & Key == 2 |
+                                Classes_present == '1_1_0' & Key == 1 |
+                                Classes_present == '1_1_0' & Key == 2, 'High',
+                              ifelse(Classes_present == '0_1_0' |
+                                       Classes_present == '1_1_1' & Key == 3 |
+                                       Classes_present == '1_1_0' & Key == 3 |
+                                       Classes_present == '1_1_0' & Key == 4 |
+                                       Classes_present == '0_1_1' & Key == 1 |
+                                       Classes_present == '0_1_1' & Key == 2, 'Medium', 'Low'))) %>%
+  mutate(Class_duplicate = Usage_class) %>%
+  group_by(Agency_name, Park_name, Usage_class, Day_type) %>%
+  mutate(Key = row_number()) %>%
+  ungroup() %>%
+  unite(Block_key, Class_duplicate, Key) %>%
+  mutate(Class_duplicate = Usage_class,
+         Day_type_duplicate = Day_type) %>%
+  group_by(Agency_name, Park_name, Usage_class, Day_type) %>%
+  mutate(Key = row_number()) %>%
+  ungroup() %>%
+  unite(Block_day_type_key, Class_duplicate, Day_type_duplicate, Key) %>%
+  mutate(Class_key = ifelse(Agency_name == 'Ramsey County', Block_day_type_key, Block_key)) %>%
+  select(-Block_day_type_key, -Classes_present, -Block_key)
+
+schedule_pairs_1 <- left_join(dates_classes_key, times_samples, by = c('Agency_name' = 'Agency_name', 'Park_name' = 'Park_or_trail_name', 'Usage_class' = 'Usage_class', 'Class_key' = 'Class_key', 'Pairing' = 'Pairing'))
+
+schedule_1 <- schedule_pairs_1 %>%
+  filter(!is.na(Pairing_order))
+
+```
+
+# Hyland Lake Park Reserve Entrance 1 Closed for Second Half of Summer
+
+Reschedule counts scheduled for entrance 1 in the second half of summer.
+
+```{r}
+# Find Hyland Park entrance 1 counts in the second half of the summer -> take usage_class and day_type of counts
+hyland_closed_2 <- schedule_1 %>%
+  filter(Park_name == 'Hyland Lake Park Reserve' & Half_of_summer == 'Second' & Entrance_id == 1) %>%
+  select(Park_name, Day_type, Usage_class) %>%
+  unique()
+
+# hyland_second_pool <- inner_join(classes_df, hyland_closed_2, by = c('Park_or_trail_name' = 'Park_name', 'Usage_class', 'Day_type')) # There aren't any other high usage sites; find medium usage
+
+hyland <- classes_df %>%
+  filter(Park_or_trail_name == 'Hyland Lake Park Reserve')
+
+hyland_second_pool <- anti_join(hyland, hyland_closed_2, by = c('Usage_class'))
+
+hyland_pool <- hyland_second_pool %>%
+  group_by(Usage_class)
+
+set.seed(334)
+hyland_sample <- sample_n(hyland_pool, 2, replace = T)
+
+hyland_counts_day <- hyland_sample %>%
+  group_by(Usage_class) %>%
+  mutate(Class_id = row_number()) %>%
+  ungroup() %>%
+  mutate(Day_type = ifelse(Class_id == 1, 'Weekend_holiday', 'Weekday')) %>%
+  ungroup() %>%
+  group_by(Day_type) %>%
+  mutate(Day_type_index = row_number()) %>%
+  ungroup() %>%
+  mutate(Day_type_2 = Day_type) %>%
+  unite(Day_ordering, Day_type_2, Day_type_index, sep = '_')
+  
+hyland_closed_2_full <- schedule_1 %>%
+  filter(Park_name == 'Hyland Lake Park Reserve' & Half_of_summer == 'Second' & Entrance_id == 1) %>%
+  select(Agency_name, Park_name, Half_of_summer, Pairing, Date, Index, Day_type, Day_type_for_class, Pairing_order,  Park_trail_id) %>%
+  group_by(Day_type) %>%
+  mutate(Class_id = row_number()) %>%
+  ungroup() %>%
+  mutate(Day_type_2 = Day_type) %>%
+  unite(Day_ordering, Day_type_2, Class_id, sep = '_')
+
+hyland_counts_replace <- left_join(hyland_counts_day, hyland_closed_2_full, by = c('Agency_name', 'Park_or_trail_name' = 'Park_name', 'Park_trail_id', 'Day_ordering', 'Day_type'))
+
+hyland_2_schedule <- hyland_counts_replace %>%
+  select(-Day_ordering) %>%
+  rename(Park_name = Park_or_trail_name)
+
+hyland_closed <- schedule_1 %>%
+  filter(Park_name == 'Hyland Lake Park Reserve' & Half_of_summer == 'Second' & Entrance_id == 1)
+
+schedule_1_no_hyland <- anti_join(schedule_1, hyland_closed)
+
+schedule_1_final <- bind_rows(schedule_1_no_hyland, hyland_2_schedule)
+
+```
+
+# Times for No. 2 Parks of Pairings
+
+Times for counts at no. 2 parks are contingent on the times selected for no. 1 parks:  times of no. 2 must be adjacent to the counts taking place at no. 1 parks (i.e. so the counter can go directly from one count to the next without splitting their shift).  No. 2 parks still need the correct configuration of high/medium/low samples per block.
+
+```{r}
+
+####### 2 Pairings
+
+# Note that commented out code will produce schedules that do not take into account the time of the A-pairing timeslot (which makes this half of the process moot, since the point of pairing is to select ADJACENT timeslots to the A-pair's, on the same 16 dates selected for the A-pairs).
+
+# selection_2 <- selection_df %>%
+#   ungroup() %>%
+#   filter(Pairing_order == 2) %>%
+#   mutate(Sample_block = ifelse(Classes_present == '1_0_0' & is.na(Day_type) |
+#                                  Classes_present == '0_1_0' & is.na(Day_type) |
+#                                  Classes_present == '0_0_1'& is.na(Day_type), '16 samples to be taken',
+#                                ifelse(Classes_present == '1_1_1' & Usage_class == 'High' & is.na(Day_type) |
+#                                         Classes_present == '1_1_0' & is.na(Day_type) |
+#                                         Classes_present == '0_1_1' & is.na(Day_type) |
+#                                         Classes_present == '1_0_1' & is.na(Day_type) |
+#                                         Classes_present == '1_0_0' & !is.na(Day_type) | # High sites only, Ramsey
+#                                         Classes_present == '0_1_0' & !is.na(Day_type) | # Medium sites only, Ramsey
+#                                         Classes_present == '0_0_1' & !is.na(Day_type) , '8 samples to be taken',
+#                                ifelse(Classes_present == '1_1_1' & !is.na(Day_type) & Usage_class == 'High' |
+#                                         Classes_present == '1_1_1' & Usage_class != 'High' & is.na(Day_type) |
+#                                         Classes_present == '1_0_1' & !is.na(Day_type) |
+#                                         Classes_present == '1_1_0' & !is.na(Day_type) | Classes_present == '0_1_1' & !is.na(Day_type), '4 samples to be taken', '2 samples to be taken'))))
+
+selection_2 <- selection_df %>%
+  ungroup() %>%
+  filter(Pairing_order == 2) %>%
+  mutate(Samples_to_take = ifelse(Classes_present == '1_0_0' |
+                                 Classes_present == '0_1_0' |
+                                 Classes_present == '0_0_1' , '16',
+                               ifelse(Classes_present == '1_1_1' & Usage_class == 'High' |
+                                        Classes_present == '1_1_0' |
+                                        Classes_present == '0_1_1' |
+                                        Classes_present == '1_0_1' , '8',
+                               ifelse(Classes_present == '1_1_1' & Usage_class != 'High', '4', 'Other')))) %>%
+  mutate(Usage_class_2 = Usage_class) %>%
+  unite(Sample_block, Samples_to_take, Usage_class_2, sep = ' ')
+
+
+# Add timeslot and date selected in above section to selection 2
+times_dates_1 <- schedule_1_final %>%
+  select(Pairing, Date, Start_time, Day_type_for_class, Day_type, Half_of_summer) %>%
+  rename(Count_start = Start_time,
+         Count_day_type = Day_type)
+
+selection_1_2 <- left_join(selection_2, times_dates_1, by = c('Pairing', 'Day_type' = 'Day_type_for_class'))
+
+# Find distance of potential timeslot from timeslot selected for first park in pair
+distance_matrix <- selection_1_2 %>%
+  mutate(Distance = abs(Count_start-Start_time)) %>%
+  filter(Distance != 0) %>% # Count cannot start at the same time as the count for the first park
+  group_by(Agency_name, Park_or_trail_name, Date, Usage_class, Day_type) %>%
+  mutate(Min_distance = min(Distance)) %>%
+  ungroup() %>%
+  filter(Min_distance == Distance) %>%
+  select(-Min_distance, -Distance) %>%
+  group_by(Date, Usage_class, Agency_name, Park_or_trail_name)
+
+#set.seed(1234)
+set.seed(5488)
+schedule_2_pool <- sample_n(distance_matrix, 1) #select one of each usage classification for each date
+
+# Take timeslot samples
+
+## 16 samples
+all_16 <- schedule_2_pool %>%
+  ungroup() %>%
+  filter(Sample_block == '16 High' | Sample_block == '16 Medium' | Sample_block == '16 Low') %>%
+  group_by(Agency_name, Park_or_trail_name, Date)
+
+#set.seed(1234)
+set.seed(25)
+sample_16 <- sample_n(all_16, 1, replace = F)
+
+## 16s don't need to be anti-joined because they cover all the dates for the counting season
+
+## 8 samples - high
+select_8_high <- schedule_2_pool %>%
+  ungroup() %>%
+  filter(Sample_block == '8 High' | Sample_block == '2 High') %>%
+  group_by(Agency_name, Park_or_trail_name, Count_day_type, Half_of_summer)
+
+
+i <- 1
+samples_8_high <- list()
+
+while(i < 2) {
+
+  set.seed(i)
+  samples_8_high[[i]] <- sample_n(select_8_high, 2, replace = F)
+  i <- i + 1
+
+}
+
+high_8 <- do.call(bind_rows, samples_8_high)
+
+high_8_ungrouped <- high_8 %>% ungroup()
+
+medium_8_pool <- anti_join(schedule_2_pool, high_8_ungrouped, by = c('Agency_name', 'Park_or_trail_name', 'Date')) # remove selected dates from sampling pool for next round of sampling
+
+## 8 samples - medium
+select_8_medium <- medium_8_pool %>%
+  ungroup() %>%
+  filter(Sample_block == '8 Medium' | Sample_block == '2 Medium') %>%
+  group_by(Agency_name, Park_or_trail_name, Count_day_type, Half_of_summer)
+
+
+i <- 1
+samples_8_medium <- list()
+
+while(i < 2) {
+
+  set.seed(i)
+  samples_8_medium[[i]] <- sample_n(select_8_medium, 2, replace = F)
+  i <- i + 1
+
+}
+
+medium_8 <- do.call(bind_rows, samples_8_medium)
+
+
+medium_8_ungrouped <- medium_8 %>% ungroup()
+
+low_8_pool <- anti_join(medium_8_pool, medium_8_ungrouped, by = c('Agency_name', 'Park_or_trail_name', 'Date')) # remove selected dates from pool for next round of sampling
+
+## 8 samples - low
+select_8_low <- low_8_pool %>%
+  ungroup() %>%
+  filter(Sample_block == '8 Low' | Sample_block == '2 Low') %>%
+  group_by(Agency_name, Park_or_trail_name, Count_day_type, Half_of_summer)
+
+
+i <- 1
+samples_8_low <- list()
+
+while(i < 2) {
+
+  set.seed(i)
+  samples_8_low[[i]] <- sample_n(select_8_low, 2, replace = F)
+  i <- i + 1
+
+}
+
+low_8 <- do.call(bind_rows, samples_8_low)
+
+low_8_ungrouped <- low_8 %>% ungroup()
+
+high_4_pool <- anti_join(low_8_pool, low_8_ungrouped, by = c('Agency_name', 'Park_or_trail_name', 'Date'))
+
+## 4 samples - high
+select_4_high <- high_4_pool %>%
+  ungroup() %>%
+  filter(Sample_block == '4 High') %>%
+  group_by(Agency_name, Park_or_trail_name, Count_day_type, Half_of_summer)
+
+#set.seed(1234)
+set.seed(880)
+samples_4_high <- sample_n(select_4_high, 1)
+
+high_4_ungrouped <- samples_4_high %>% ungroup()
+
+medium_4_pool <- anti_join(high_4_pool, high_4_ungrouped, by = c('Agency_name', 'Park_or_trail_name', 'Date'))
+
+## 4 samples - medium
+select_4_medium <- medium_4_pool %>%
+  ungroup() %>%
+  filter(Sample_block == '4 Medium') %>%
+  group_by(Agency_name, Park_or_trail_name, Count_day_type, Half_of_summer)
+
+#set.seed(1234)
+set.seed(377)
+samples_4_medium <- sample_n(select_4_medium, 1)
+
+medium_4_ungrouped <- samples_4_medium %>% ungroup()
+
+low_4_pool <- anti_join(medium_4_pool, medium_4_ungrouped, by = c('Agency_name', 'Park_or_trail_name', 'Date'))
+
+## 4 samples - medium
+select_4_low <- low_4_pool %>%
+  ungroup() %>%
+  filter(Sample_block == '4 Low') %>%
+  group_by(Agency_name, Park_or_trail_name, Count_day_type, Half_of_summer)
+
+#set.seed(1234)
+set.seed(123)
+samples_4_low <- sample_n(select_4_low, 1)
+
+sample_pairs_2 <- bind_rows(sample_16, samples_8_high, samples_8_medium, samples_8_low, samples_4_high, samples_4_medium, samples_4_low)
+
+schedule_2 <- sample_pairs_2 %>%
+  ungroup() %>%
+  select(Agency_name, Park_or_trail_name, Entrance_name, Entrance_id, Date, Count_day_type, Usage_class, Half_of_summer, Start_time) %>%
+  rename(Day_type = Count_day_type)
+
+# 
+# set.seed(1234)
+# select_4 <- distance_matrix %>%
+#   filter(Sample_block == '4 samples to be taken') %>%
+#   group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+# 
+# sample_4 <- sample_n(select_4, 4, replace = T)
+# 
+# set.seed(1234)
+# select_2 <- distance_matrix %>%
+#   filter(Sample_block == '2 samples to be taken') %>%
+#   group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+# 
+# sample_2 <- sample_n(select_2, 2, replace = T)
+
+# 
+# set.seed(1234)
+# select_8_we <- distance_matrix %>%
+#   ungroup() %>%
+#   mutate(Include = ifelse(Agency_name == 'Ramsey County' & Day_type == 'Weekend' & Sample_block == '16 samples to be taken', 1,
+#                           ifelse(Agency_name != 'Ramsey County' & Sample_block == '16 samples to be taken', 1, 0))) %>%
+#   filter(Include == 1) %>%
+#   group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+# 
+# select_8_wd <- distance_matrix %>%
+#   ungroup() %>%
+#   mutate(Include = ifelse(Agency_name == 'Ramsey County' & Day_type == 'Weekday' & Sample_block == '16 samples to be taken', 1,
+#                           ifelse(Agency_name != 'Ramsey County' & Sample_block == '16 samples to be taken', 1, 0))) %>%
+#   filter(Include == 1) %>%
+#   group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+# 
+# 
+# sample_8_we <- sample_n(select_8_we, 8, replace = T)
+# sample_8_wd <- sample_n(select_8_wd, 8, replace = T)
+# 
+# set.seed(1234)
+# select_4_we <- distance_matrix %>%
+#   ungroup() %>%
+#   mutate(Include = ifelse(Agency_name == 'Ramsey County' & Day_type == 'Weekend' & Sample_block == '8 samples to be taken', 1,
+#                           ifelse(Agency_name != 'Ramsey County' & Sample_block == '8 samples to be taken', 1, 0))) %>%
+#   filter(Include == 1) %>%
+#   group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+# 
+# select_4_wd <- distance_matrix %>%
+#   ungroup() %>%
+#   mutate(Include = ifelse(Agency_name == 'Ramsey County' & Day_type == 'Weekday' & Sample_block == '8 samples to be taken', 1,
+#                           ifelse(Agency_name != 'Ramsey County' & Sample_block == '8 samples to be taken', 1, 0))) %>%
+#   filter(Include == 1) %>%
+#   group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+# 
+# sample_4_we <- sample_n(select_4_we, 4, replace = T)
+# sample_4_wd <- sample_n(select_4_wd, 4, replace = T)
+# 
+# set.seed(1234)
+# select_2_we <- distance_matrix %>%
+#   ungroup() %>%
+#   mutate(Include = ifelse(Agency_name == 'Ramsey County' & Day_type == 'Weekend' & Sample_block == '4 samples to be taken', 1,
+#                           ifelse(Agency_name != 'Ramsey County' & Sample_block == '4 samples to be taken', 1, 0))) %>%
+#   filter(Include == 1) %>%
+#   group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+# 
+# select_2_wd <- distance_matrix %>%
+#   ungroup() %>%
+#   mutate(Include = ifelse(Agency_name == 'Ramsey County' & Day_type == 'Weekday' & Sample_block == '4 samples to be taken', 1,
+#                           ifelse(Agency_name != 'Ramsey County' & Sample_block == '4 samples to be taken', 1, 0))) %>%
+#   filter(Include == 1) %>%
+#   group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type)
+# 
+# sample_2_we <- sample_n(select_2_we, 2, replace = T)
+# sample_2_wd <- sample_n(select_2_wd, 2, replace = T)
+# 
+# set.seed(1234)
+# select_1_we <- distance_matrix %>%
+#   ungroup() %>%
+#   mutate(Include = ifelse(Agency_name == 'Ramsey County' & Day_type == 'Weekend' & Sample_block == '2 samples to be taken', 1,
+#                           ifelse(Agency_name != 'Ramsey County' & Sample_block == '2 samples to be taken', 1, 0))) %>%
+#   filter(Include == 1) %>%
+#   group_by(Agency_name, Park_or_trail_name, Usage_class)
+# 
+# select_4_wd <- distance_matrix %>%
+#   ungroup() %>%
+#   mutate(Include = ifelse(Agency_name == 'Ramsey County' & Day_type == 'Weekday' & Sample_block == '2 samples to be taken', 1,
+#                           ifelse(Agency_name != 'Ramsey County' & Sample_block == '2 samples to be taken', 1, 0))) %>%
+#   filter(Include == 1) %>%
+#   group_by(Agency_name, Park_or_trail_name, Usage_class)
+# 
+# sample_1_we <- sample_n(select_1_we, 1)
+# sample_1_wd <- sample_n(select_1_wd, 1)
+# 
+# # Bind all timeslot samples together
+# sample_pairs_2 <- bind_rows(sample_8_wd, sample_8_we, sample_4_we, sample_4_wd, sample_2_we, sample_2_wd, sample_1_we, sample_1_wd)
+# 
+# schedule_2_prepped <- sample_pairs_2 %>%
+#   ungroup() %>%
+#   select(Agency_name, Park_or_trail_name, Entrance_name, Entrance_id, Usage_class, Start_time, Day_type, Classes_present) %>%
+#   ungroup() %>%
+#   mutate(Class_duplicate = Usage_class) %>%
+#   group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type) %>%
+#   mutate(Key = row_number()) %>%
+#   ungroup() %>%
+#   unite(Block_key, Class_duplicate, Key) %>%
+#   mutate(Class_duplicate = Usage_class,
+#          Day_type_duplicate = Day_type) %>%
+#   group_by(Agency_name, Park_or_trail_name, Usage_class, Day_type) %>%
+#   mutate(Key = row_number()) %>%
+#   ungroup() %>%
+#   unite(Block_day_type_key, Class_duplicate, Day_type_duplicate, Key) %>%
+#   mutate(Class_key = ifelse(Agency_name == 'Ramsey County', Block_day_type_key, Block_key)) %>%
+#   rename(Day_type_for_class = Day_type)
+# 
+# schedule_pairs_2 <- left_join(dates_classes_key, schedule_2_prepped, by = c('Agency_name' = 'Agency_name', 'Park_name' = 'Park_or_trail_name', 'Usage_class' = 'Usage_class', 'Class_key' = 'Class_key'))
+# 
+# schedule_2 <- schedule_pairs_2 %>%
+#   mutate(Pairing_1 = ifelse(is.na(Entrance_name) & is.na(Start_time), 1, 0)) %>%
+#   filter(Pairing_1 == 0) %>%
+#   select(-Day_type_for_class, -Index, -Class_key, -Pairing, -Pairing_1) %>%
+#   rename(Park_or_trail_name = Park_name)
+
+schedule_1_pared <- schedule_1_final %>%
+  ungroup() %>%
+  select(Agency_name, Park_name, Entrance_name, Entrance_id, Date, Day_type, Usage_class, Half_of_summer, Start_time) %>%
+  rename(Park_or_trail_name = Park_name)
+
+schedule <- bind_rows(schedule_1_pared, schedule_2)
+
+write_csv(schedule, '2019 Schedule.csv')
+
+schedule_ia <- schedule %>%
+  split(.$Agency_name)
+
+sapply(names(schedule_ia),
+ function (x) write_csv(schedule_ia[[x]], paste(x, "csv", sep=".")))
+
+
+```
+
+```{r}
+
+# Check that all parks received counts
+
+schedule %>%
+  select(Agency_name, Park_or_trail_name) %>%
+  unique() %>%
+  group_by(Agency_name) %>%
+  count()
+
+
+classes_df %>%
+  select(Agency_name, Park_or_trail_name) %>%
+  unique() %>%
+  group_by(Agency_name) %>%
+  count()
+```
+
