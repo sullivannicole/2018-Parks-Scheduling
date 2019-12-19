@@ -1,0 +1,46 @@
+---
+title: "2018 Sampling Plan"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+setwd('Docs and Comms/Rationale for Sampling Plan/')
+plans <- list.files(pattern = '*.csv')
+
+list2env(map(set_names(plans, gsub('.csv$', '', plans)), read_csv), envir = .GlobalEnv)
+
+plans_l <- list(`2018 Anoka Sampling Plan`, `2018 Bloomington Sampling Plan`, `2018 Carver Sampling Plan`, `2018 Dakota Sampling Plan`, `2018 MPRB Sampling Plan`, `2018 Ramsey Sampling Plan`, `2018 Scott Sampling Plan`, `2018 StP Sampling Plan`, `2018 TRPD Sampling Plan`, `2018 Washington Sampling Plan`)
+
+`2018 Anoka Sampling Plan` %>%
+  gather(-Agency, -Sampling_block, key = 'Park_name', value = 'Usage_class') %>%
+  filter(!is.na(Usage_class))
+
+plans_tidy <- map(plans_l, function(x) x %>% gather(-Agency, -Sampling_block, key = 'Park_name', value = 'Usage_class') %>% filter(!is.na(Usage_class)) %>% mutate(Sampling_block = ifelse(Sampling_block == '2WD', '2 WD', trimws(Sampling_block))) %>% separate(Sampling_block, into = c('Half_of_summer', 'Day_type'), sep = ' ') %>% mutate(Half_of_summer = ifelse(Half_of_summer == '2', '2nd', Half_of_summer)))
+
+plans_full <- do.call(bind_rows, plans_tidy)
+
+righted <- plans_full %>%
+  select(Agency, Park_name) %>%
+  unique() %>%
+  group_by(Agency) %>%
+  count() %>%
+  mutate(Righted_number = n*16) %>%
+  ungroup() %>%
+  select(Agency, Righted_number) %>%
+  unique()
+
+past_years <- plans_full %>%
+  group_by(Agency) %>%
+  count() %>%
+  rename(Past_number = n)
+
+righted_v_past <- full_join(righted, past_years, by = c('Agency'))
+
+righted_sampling <- righted_v_past %>%
+  gather(Past_number, Righted_number, key = 'Sampling_category', value = 'Samples')
+
+write_csv(plans_full, '2018 Sampling Plan.csv')
+write_csv(righted_sampling, 'Righted v Actual Sampling.csv')
+
+```
